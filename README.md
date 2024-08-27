@@ -23,6 +23,10 @@ preparing
 
 
 # Installation 
+## Version 
+Ubuntu 22.04 
+ROS2 Humble
+
 ## 1. Clone the Repository:
 
 `git clone https://github.com/JAEKWANBLNR/Large-Model-Drive.git`
