@@ -25,6 +25,9 @@ preparing
 
 
 # Installation 
+
+## 설치는 ROS-LLM Github링크를 따라하는게 더 좋을것 같습니다! 
+
 ## Version 
 Ubuntu 22.04 
 ROS2 Humble
