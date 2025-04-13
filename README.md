@@ -18,12 +18,10 @@ BLIP
 
 #Project Example Video
 
-Uploading 해커톤 실험 영상.mp4…
-
-
-
+https://github.com/user-attachments/assets/6b05fb82-b714-4516-a2bc-393df2095a4c
 
 # Project rqt_grpah
+
 ![Untitled (3)](https://github.com/user-attachments/assets/23dba483-5822-48f8-8e7c-72a9f3732093)
 
 
