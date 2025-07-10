@@ -3,13 +3,13 @@
 The Large-Model-Drive project is ROS2 humble project combined the on ROS-LLM (https://github.com/Auromix/ROS-LLM) and vlms_with_ros2_workshop (https://github.com/nilutpolkashyap/vlms_with_ros2_workshop) projects for mobile robot drive with natural language instruction and enhancing the situation awarness improvement for user. It enables understand the natural language instruction so that control the mobile robot and through the VLM (BLIP is used in this project) understand the scene and describe the situation. 
 
 ### Object Dection Model 
-YOLOv8.n 
+ - YOLOv8.n 
 
 ### Language Model 
-GPT 3.5
+ - GPT 3.5
 
 ### Vision-Language Model
-BLIP 
+ - BLIP 
 
 
 # Project Example Screenshot  
