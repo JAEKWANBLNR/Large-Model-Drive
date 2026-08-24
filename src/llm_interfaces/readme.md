@@ -1,4 +1,9 @@
 # llm_interfaces
 
-## Package Description
-The `llm_interfaces` package provides interfaces for `ROS-LLM`.
+Defines the `ChatGPT` ROS 2 service used to pass a JSON function call to a robot tool server and return a JSON result to the model node.
+
+```text
+string request_text
+---
+string response_text
+```

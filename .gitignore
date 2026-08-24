@@ -1,0 +1,33 @@
+# ROS 2 / colcon
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets and local runtime state
+.env
+.env.*
+!.env.example
+chat_history_*.json
+
+# Model weights and generated media
+*.onnx
+*.pt
+*.pth
+*.engine
+*.mp3
+*.wav
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db

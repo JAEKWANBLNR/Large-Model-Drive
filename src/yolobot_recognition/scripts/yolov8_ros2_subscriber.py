@@ -1,83 +1,92 @@
 #!/usr/bin/env python3
+"""Render received YOLO detections over the latest RGB frame."""
 
 import cv2
-import threading
 import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
 
 from yolov8_msgs.msg import Yolov8Inference
 
-bridge = CvBridge()
 
-class Camera_subscriber(Node):
+class YoloOverlay(Node):
+    """Combine camera and detection subscriptions in one race-free node."""
 
-    def __init__(self):
-        super().__init__('camera_subscriber')
-
-        self.subscription = self.create_subscription(
+    def __init__(self) -> None:
+        """Initialize image, detection, and annotated-image ROS interfaces."""
+        super().__init__("yolov8_overlay")
+        self.declare_parameter("image_topic", "/camera_sensor/image_raw")
+        self.declare_parameter("inference_topic", "/yolov8/inference")
+        self.declare_parameter("overlay_topic", "/yolov8/overlay_image")
+        self.bridge = CvBridge()
+        self.latest_image = None
+        self.latest_header = None
+        self.image_subscription = self.create_subscription(
             Image,
-            'rgb_cam/image_raw',
-            self.camera_callback,
-            10)
-        self.subscription 
-
-    def camera_callback(self, data):
-        global img
-        img = bridge.imgmsg_to_cv2(data, "bgr8")
-
-class Yolo_subscriber(Node):
-
-    def __init__(self):
-        super().__init__('yolo_subscriber')
-
-        self.subscription = self.create_subscription(
+            self.get_parameter("image_topic").value,
+            self.image_callback,
+            qos_profile_sensor_data,
+        )
+        self.inference_subscription = self.create_subscription(
             Yolov8Inference,
-            '/Yolov8_Inference',
-            self.yolo_callback,
-            10)
-        self.subscription 
+            self.get_parameter("inference_topic").value,
+            self.inference_callback,
+            10,
+        )
+        self.overlay_publisher = self.create_publisher(
+            Image,
+            self.get_parameter("overlay_topic").value,
+            10,
+        )
 
-        self.cnt = 0
+    def image_callback(self, message: Image) -> None:
+        """Cache the latest camera frame for annotation."""
+        try:
+            self.latest_image = self.bridge.imgmsg_to_cv2(message, "bgr8").copy()
+            self.latest_header = message.header
+        except Exception as error:
+            self.get_logger().error(f"Image conversion failed: {error}")
 
-        self.img_pub = self.create_publisher(Image, "/inference_result_cv2", 1)
+    def inference_callback(self, message: Yolov8Inference) -> None:
+        """Draw received detections on the latest frame and publish it."""
+        if self.latest_image is None:
+            self.get_logger().warning("Detection arrived before the first image.")
+            return
+        image = self.latest_image.copy()
+        for detection in message.yolov8_inference:
+            top_left = (detection.left, detection.top)
+            bottom_right = (detection.right, detection.bottom)
+            cv2.rectangle(image, top_left, bottom_right, (255, 255, 0), 2)
+            label = f"{detection.class_name} {detection.confidence:.2f}"
+            cv2.putText(
+                image,
+                label,
+                (detection.left, max(15, detection.top - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+        output = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
+        output.header = message.header or self.latest_header
+        self.overlay_publisher.publish(output)
 
-    def yolo_callback(self, data):
-        global img
-        for r in data.yolov8_inference:
-        
-            class_name = r.class_name
-            top = r.top
-            left = r.left
-            bottom = r.bottom
-            right = r.right
-            yolo_subscriber.get_logger().info(f"{self.cnt} {class_name} : {top}, {left}, {bottom}, {right}")
-            cv2.rectangle(img, (top, left), (bottom, right), (255, 255, 0))
-            self.cnt += 1
 
-        self.cnt = 0
-        img_msg = bridge.cv2_to_imgmsg(img)  
-        self.img_pub.publish(img_msg)
-
-if __name__ == '__main__':
-    rclpy.init(args=None)
-    yolo_subscriber = Yolo_subscriber()
-    camera_subscriber = Camera_subscriber()
-
-    executor = rclpy.executors.MultiThreadedExecutor()
-    executor.add_node(yolo_subscriber)
-    executor.add_node(camera_subscriber)
-
-    executor_thread = threading.Thread(target=executor.spin, daemon=True)
-    executor_thread.start()
-    
-    rate = yolo_subscriber.create_rate(2)
+def main(args: list[str] | None = None) -> None:
+    """Run the YOLO visualization node."""
+    rclpy.init(args=args)
+    node = YoloOverlay()
     try:
-        while rclpy.ok():
-            rate.sleep()
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
-    rclpy.shutdown()
-    executor_thread.join()
+
+if __name__ == "__main__":
+    main()

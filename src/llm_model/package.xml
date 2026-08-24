@@ -2,13 +2,15 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>llm_model</name>
-  <version>0.0.1</version>
+  <version>0.1.0</version>
   <description>The llm_model package provides a conversational interface using the OpenAI API through the implementation of the ChatGPT node.</description>
   <maintainer email="hermanye233@icloud.com">hermanye</maintainer>
   <license>Apache-2.0</license>
 
   <depend>llm_config</depend>
   <depend>llm_interfaces</depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

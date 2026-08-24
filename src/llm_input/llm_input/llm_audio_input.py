@@ -1,196 +1,158 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# flake8: noqa
-#
-# Copyright 2023 Herman Ye @Auromix
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Description:
-#
-# Node test Method:
-# ros2 run llm_input llm_audio_input
-# ros2 topic echo /llm_input_audio_to_text
-# ros2 topic pub /llm_state std_msgs/msg/String "data: 'listening'" -1
-#
-# Author: Herman Ye @Auromix
+"""Record microphone audio and transcribe it with Amazon Transcribe."""
 
-# Other libraries
-import datetime
+import datetime as dt
 import json
-import requests
+import tempfile
+import threading
 import time
+import uuid
+from pathlib import Path
 
-# AWS ASR related
 import boto3
-
-# Audio recording related
-import sounddevice as sd
-from scipy.io.wavfile import write
-
-# ROS related
 import rclpy
+import requests
+import sounddevice as sd
+from llm_config.user_config import UserConfig
 from rclpy.node import Node
+from scipy.io.wavfile import write
 from std_msgs.msg import String
 
-# Global Initialization
-from llm_config.user_config import UserConfig
 
-config = UserConfig()
+class AwsAudioInput(Node):
+    """Publish AWS Transcribe results using the normal AWS credential chain."""
 
-
-class AudioInput(Node):
-    def __init__(self):
-        super().__init__("llm_audio_input")
-
-        # AWS service initialization
-        self.aws_audio_file = "/tmp/user_audio_input.flac"
-        self.aws_access_key_id = config.aws_access_key_id
-        self.aws_secret_access_key = config.aws_secret_access_key
-        self.aws_region_name = config.aws_region_name
-        self.aws_session = boto3.Session(
-            aws_access_key_id=self.aws_access_key_id,
-            aws_secret_access_key=self.aws_secret_access_key,
-            region_name=self.aws_region_name,
-        )
-
-        # Initialization publisher
+    def __init__(self) -> None:
+        """Initialize AWS clients lazily and configure ROS interfaces."""
+        super().__init__("llm_audio_input_aws")
+        self.config = UserConfig()
+        self.declare_parameter("input_topic", "/llm/input_text")
+        self.aws_session = boto3.Session(region_name=self.config.aws_region_name)
+        self.state_publisher = self.create_publisher(String, "/llm/state", 10)
         self.initialization_publisher = self.create_publisher(
-            String, "/llm_initialization_state", 0
+            String, "/llm/initialization_state", 10
         )
-
-        # LLM state publisher
-        self.llm_state_publisher = self.create_publisher(String, "/llm_state", 0)
-
-        # LLM state listener
-        self.llm_state_subscriber = self.create_subscription(
-            String, "/llm_state", self.state_listener_callback, 0
+        self.transcript_publisher = self.create_publisher(
+            String, self.get_parameter("input_topic").value, 10
         )
-
-        self.audio_to_text_publisher = self.create_publisher(
-            String, "/llm_input_audio_to_text", 0
+        self.state_subscriber = self.create_subscription(
+            String, "/llm/state", self.state_listener_callback, 10
         )
-        # Initialization ready
-        self.publish_string("llm_audio_input", self.initialization_publisher)
+        self.busy = False
+        self._publish_string("llm_audio_input_aws", self.initialization_publisher)
+        self.start_timer = self.create_timer(2.0, self._start_listening)
 
-    def state_listener_callback(self, msg):
-        if msg.data == "listening":
-            self.get_logger().info(f"STATE: {msg.data}")
-            self.action_function_listening()
+    def _start_listening(self) -> None:
+        self._publish_string("listening", self.state_publisher)
+        self.start_timer.cancel()
 
-    def action_function_listening(self):
-        # Recording settings
-        duration = config.duration  # Audio recording duration, in seconds
-        sample_rate = config.sample_rate  # Sample rate
-        volume_gain_multiplier = config.volume_gain_multiplier  # Volume gain multiplier
-        # AWS S3 settings
-        bucket_name = config.bucket_name
-        audio_file_key = "gpt_audio.flac"  # Name of the audio file in S3
-        transcribe_job_name = (
-            f'my-transcribe-job-{datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")}'
-        )
-        # Name the conversion task based on time to ensure uniqueness
-        # Path of the audio file in S3
-        transcribe_job_uri = f"s3://{bucket_name}/{audio_file_key}"
+    def state_listener_callback(self, message: String) -> None:
+        """Start one recording when the shared state enters listening."""
+        if message.data != "listening" or self.busy:
+            return
+        self.busy = True
+        threading.Thread(
+            target=self._record_and_transcribe,
+            name="aws-audio-input",
+            daemon=True,
+        ).start()
 
-        # Step 1: Record audio
-        self.get_logger().info("Start recording...")
-        audio_data = sd.rec(
-            int(duration * sample_rate), samplerate=sample_rate, channels=1
-        )
-        sd.wait()  # Wait until recording is finished
+    def _record_and_transcribe(self) -> None:
+        bucket = self.config.bucket_name
+        if not bucket:
+            self.get_logger().error("AWS_S3_BUCKET is required for AWS input.")
+            self._publish_string("listening", self.state_publisher)
+            self.busy = False
+            return
 
-        # Step 2: Increase the volume by a multiplier
-        audio_data *= volume_gain_multiplier
-
-        # Step 3: Save audio to file
-        write(self.aws_audio_file, sample_rate, audio_data)
-        self.get_logger().info("Stop recording!")
-
-        # action_function_input_processing
-        self.publish_string("input_processing", self.llm_state_publisher)
-        # Step 4: Upload audio to AWS S3
+        identifier = uuid.uuid4().hex
+        audio_path = Path(tempfile.gettempdir()) / f"llm_input_{identifier}.wav"
+        object_key = f"large-model-drive/audio/{identifier}.wav"
+        job_name = f"large-model-drive-{identifier}"
         s3 = self.aws_session.client("s3")
-        self.get_logger().info("Uploading audio to AWS S3...")
-        with open(self.aws_audio_file, "rb") as f:
-            s3.upload_fileobj(Fileobj=f, Bucket=bucket_name, Key=audio_file_key)
-        self.get_logger().info("Upload complete!")
-
-        # Step 5: Convert audio to text
-        transcribe = self.aws_session.client("transcribe")
-        self.get_logger().info("Converting audio to text...")
-        transcribe.start_transcription_job(
-            TranscriptionJobName=transcribe_job_name,
-            LanguageCode=config.aws_transcription_language,
-            Media={"MediaFileUri": transcribe_job_uri},
-        )
-
-        # Step 6: Wait until the conversion is complete
-        while True:
-            status = transcribe.get_transcription_job(
-                TranscriptionJobName=transcribe_job_name
+        uploaded = False
+        try:
+            sample_count = int(self.config.duration * self.config.sample_rate)
+            audio_data = sd.rec(
+                sample_count,
+                samplerate=self.config.sample_rate,
+                channels=1,
+                dtype="float32",
             )
-            if status["TranscriptionJob"]["TranscriptionJobStatus"] in [
-                "COMPLETED",
-                "FAILED",
-            ]:
-                break
+            sd.wait()
+            audio_data *= self.config.volume_gain_multiplier
+            write(audio_path, self.config.sample_rate, audio_data)
+            self._publish_string("input_processing", self.state_publisher)
 
-            self.get_logger().info("Converting...")
-            time.sleep(0.5)
+            s3.upload_file(str(audio_path), bucket, object_key)
+            uploaded = True
+            transcribe = self.aws_session.client("transcribe")
+            transcribe.start_transcription_job(
+                TranscriptionJobName=job_name,
+                LanguageCode=self.config.aws_transcription_language,
+                MediaFormat="wav",
+                Media={"MediaFileUri": f"s3://{bucket}/{object_key}"},
+            )
+            status = self._wait_for_job(transcribe, job_name)
+            job = status["TranscriptionJob"]
+            if job["TranscriptionJobStatus"] != "COMPLETED":
+                raise RuntimeError(job.get("FailureReason", "Transcription failed"))
 
-        # Step 7: Get the transcribed text
-        if status["TranscriptionJob"]["TranscriptionJobStatus"] == "COMPLETED":
-            transcript_file_url = status["TranscriptionJob"]["Transcript"][
-                "TranscriptFileUri"
-            ]
-            response = requests.get(transcript_file_url)
-            transcript_data = json.loads(response.text)
-            transcript_text = transcript_data["results"]["transcripts"][0]["transcript"]
-            self.get_logger().info("Audio to text conversion complete!")
-            # Step 8: Publish the transcribed text to ROS2
-            if transcript_text == "":  # Empty input
-                self.get_logger().info("Empty input!")
-                self.publish_string("listening", self.llm_state_publisher)
+            transcript_url = job["Transcript"]["TranscriptFileUri"]
+            http_response = requests.get(transcript_url, timeout=15)
+            http_response.raise_for_status()
+            transcript_data = json.loads(http_response.text)
+            transcript = transcript_data["results"]["transcripts"][0][
+                "transcript"
+            ].strip()
+            if transcript:
+                self._publish_string(transcript, self.transcript_publisher)
             else:
-                self.publish_string(transcript_text, self.audio_to_text_publisher)
-            # Step 9: Delete the temporary audio file from AWS S3
-            s3.delete_object(Bucket=bucket_name, Key=audio_file_key)
+                self._publish_string("listening", self.state_publisher)
+        except Exception as error:
+            timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+            self.get_logger().error(f"AWS transcription failed at {timestamp}: {error}")
+            self._publish_string("listening", self.state_publisher)
+        finally:
+            if uploaded:
+                try:
+                    s3.delete_object(Bucket=bucket, Key=object_key)
+                except Exception as error:
+                    self.get_logger().warning(f"S3 cleanup failed: {error}")
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.busy = False
 
-        else:
-            self.get_logger().error(
-                f"Failed to transcribe audio: {status['TranscriptionJob']['FailureReason']}"
-            )
+    @staticmethod
+    def _wait_for_job(transcribe: object, job_name: str) -> dict:
+        deadline = time.monotonic() + 180.0
+        while time.monotonic() < deadline:
+            status = transcribe.get_transcription_job(TranscriptionJobName=job_name)
+            state = status["TranscriptionJob"]["TranscriptionJobStatus"]
+            if state in {"COMPLETED", "FAILED"}:
+                return status
+            time.sleep(1.0)
+        raise TimeoutError("Amazon Transcribe did not finish within 180 seconds.")
 
-    def publish_string(self, string_to_send, publisher_to_use):
-        msg = String()
-        msg.data = string_to_send
-
-        publisher_to_use.publish(msg)
-        self.get_logger().info(
-            f"Topic: {publisher_to_use.topic_name}\nMessage published: {msg.data}"
-        )
+    @staticmethod
+    def _publish_string(text: str, publisher: object) -> None:
+        message = String()
+        message.data = text
+        publisher.publish(message)
 
 
-def main(args=None):
+def main(args: list[str] | None = None) -> None:
+    """Run the AWS audio-input ROS node."""
     rclpy.init(args=args)
-
-    audio_input = AudioInput()
-
-    rclpy.spin(audio_input)
-
-    audio_input.destroy_node()
-    rclpy.shutdown()
+    node = AwsAudioInput()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

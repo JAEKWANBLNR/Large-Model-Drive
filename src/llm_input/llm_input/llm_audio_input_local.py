@@ -1,140 +1,114 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# flake8: noqa
-#
-# Copyright 2023 Herman Ye @Auromix
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Description:
-#
-# Node test Method:
-# ros2 run llm_input llm_audio_input_local
-# ros2 topic echo /llm_input_audio_to_text
-# ros2 topic pub /llm_state std_msgs/msg/String "data: 'listening'" -1
-#
-# Author: Herman Ye @Auromix
+"""Record microphone audio and transcribe it with local Whisper."""
 
+import tempfile
+import threading
+from pathlib import Path
 
-# Open Whisper related
-import whisper
-
-# Audio recording related
-import sounddevice as sd
-from scipy.io.wavfile import write
-
-# ROS related
 import rclpy
+import sounddevice as sd
+import whisper
+from llm_config.user_config import UserConfig
 from rclpy.node import Node
+from scipy.io.wavfile import write
 from std_msgs.msg import String
 
-# Global Initialization
-from llm_config.user_config import UserConfig
 
-config = UserConfig()
+class LocalAudioInput(Node):
+    """Publish local Whisper transcripts without blocking ROS callbacks."""
 
-
-class AudioInput(Node):
-    def __init__(self):
-        super().__init__("llm_audio_input")
-        # tmp audio file
-        self.tmp_audio_file = "/tmp/user_audio_input.flac"
-
-        # Initialization publisher
+    def __init__(self) -> None:
+        """Configure audio parameters and ROS publishers/subscribers."""
+        super().__init__("llm_audio_input_local")
+        self.config = UserConfig()
+        self.declare_parameter("input_topic", "/llm/input_text")
+        self.state_publisher = self.create_publisher(String, "/llm/state", 10)
         self.initialization_publisher = self.create_publisher(
-            String, "/llm_initialization_state", 0
+            String, "/llm/initialization_state", 10
         )
-
-        # LLM state publisher
-        self.llm_state_publisher = self.create_publisher(String, "/llm_state", 0)
-
-        # LLM state listener
-        self.llm_state_subscriber = self.create_subscription(
-            String, "/llm_state", self.state_listener_callback, 0
+        self.transcript_publisher = self.create_publisher(
+            String, self.get_parameter("input_topic").value, 10
         )
-
-        self.audio_to_text_publisher = self.create_publisher(
-            String, "/llm_input_audio_to_text", 0
+        self.state_subscriber = self.create_subscription(
+            String, "/llm/state", self.state_listener_callback, 10
         )
-        # Initialization ready
-        self.publish_string("llm_audio_input", self.initialization_publisher)
+        self.busy = False
+        self.whisper_model = None
+        self._publish_string("llm_audio_input_local", self.initialization_publisher)
+        self.start_timer = self.create_timer(2.0, self._start_listening)
 
-    def state_listener_callback(self, msg):
-        if msg.data == "listening":
-            self.get_logger().info(f"STATE: {msg.data}")
-            self.action_function_listening()
+    def _start_listening(self) -> None:
+        self._publish_string("listening", self.state_publisher)
+        self.start_timer.cancel()
 
-    def action_function_listening(self):
-        # Recording settings
-        duration = config.duration  # Audio recording duration, in seconds
-        sample_rate = config.sample_rate  # Sample rate
-        volume_gain_multiplier = config.volume_gain_multiplier  # Volume gain multiplier
+    def state_listener_callback(self, message: String) -> None:
+        """Start one local transcription when the state becomes listening."""
+        if message.data != "listening" or self.busy:
+            return
+        self.busy = True
+        threading.Thread(
+            target=self._record_and_transcribe,
+            name="local-audio-input",
+            daemon=True,
+        ).start()
 
-        # Step 1: Record audio
-        self.get_logger().info("Start local recording...")
-        audio_data = sd.rec(
-            int(duration * sample_rate), samplerate=sample_rate, channels=1
-        )
-        sd.wait()  # Wait until recording is finished
+    def _record_and_transcribe(self) -> None:
+        audio_path = Path(tempfile.gettempdir()) / "llm_user_audio_input.wav"
+        try:
+            sample_count = int(self.config.duration * self.config.sample_rate)
+            self.get_logger().info("Recording microphone input.")
+            audio_data = sd.rec(
+                sample_count,
+                samplerate=self.config.sample_rate,
+                channels=1,
+                dtype="float32",
+            )
+            sd.wait()
+            audio_data *= self.config.volume_gain_multiplier
+            write(audio_path, self.config.sample_rate, audio_data)
+            self._publish_string("input_processing", self.state_publisher)
 
-        # Step 2: Increase the volume by a multiplier
-        audio_data *= volume_gain_multiplier
+            if self.whisper_model is None:
+                self.get_logger().info(
+                    f"Loading Whisper model: {self.config.whisper_model_size}"
+                )
+                self.whisper_model = whisper.load_model(self.config.whisper_model_size)
+            result = self.whisper_model.transcribe(
+                str(audio_path), language=self.config.whisper_language
+            )
+            transcript = str(result.get("text", "")).strip()
+            if transcript:
+                self._publish_string(transcript, self.transcript_publisher)
+            else:
+                self.get_logger().warning("Whisper returned an empty transcript.")
+                self._publish_string("listening", self.state_publisher)
+        except Exception as error:
+            self.get_logger().error(f"Local transcription failed: {error}")
+            self._publish_string("listening", self.state_publisher)
+        finally:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.busy = False
 
-        # Step 3: Save audio to file
-        write(self.tmp_audio_file, sample_rate, audio_data)
-        self.get_logger().info("Stop local recording!")
-
-        # action_function_input_processing
-        self.publish_string("input_processing", self.llm_state_publisher)
-
-        # Step 4: Process audio with OpenAI Whisper
-        whisper_model = whisper.load_model(config.whisper_model_size)
-
-        # Step 6: Wait until the conversion is complete
-        self.get_logger().info("Local Converting...")
-
-        # Step 7: Get the transcribed text
-        whisper_result = whisper_model.transcribe(self.tmp_audio_file,language=config.whisper_language)
-
-        transcript_text = whisper_result["text"]
-        self.get_logger().info("Audio to text conversion complete!")
-
-        # Step 8: Publish the transcribed text to ROS2
-        if transcript_text == "":  # Empty input
-            self.get_logger().info("Empty input!")
-            self.publish_string("listening", self.llm_state_publisher)
-        else:
-            self.publish_string(transcript_text, self.audio_to_text_publisher)
-
-    def publish_string(self, string_to_send, publisher_to_use):
-        msg = String()
-        msg.data = string_to_send
-
-        publisher_to_use.publish(msg)
-        self.get_logger().info(
-            f"Topic: {publisher_to_use.topic_name}\nMessage published: {msg.data}"
-        )
+    @staticmethod
+    def _publish_string(text: str, publisher: object) -> None:
+        message = String()
+        message.data = text
+        publisher.publish(message)
 
 
-def main(args=None):
+def main(args: list[str] | None = None) -> None:
+    """Run the local Whisper audio-input ROS node."""
     rclpy.init(args=args)
-
-    audio_input = AudioInput()
-
-    rclpy.spin(audio_input)
-
-    audio_input.destroy_node()
-    rclpy.shutdown()
+    node = LocalAudioInput()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

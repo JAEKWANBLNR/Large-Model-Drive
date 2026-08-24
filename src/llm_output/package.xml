@@ -2,10 +2,14 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>llm_output</name>
-  <version>0.0.1</version>
-  <description>ROS-LLM output Package</description>
+  <version>0.1.0</version>
+  <description>Optional speech output nodes for Large Model Drive.</description>
   <maintainer email="hermanye233@icloud.com">Herman Ye</maintainer>
   <license>Apache-2.0</license>
+
+  <depend>llm_config</depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

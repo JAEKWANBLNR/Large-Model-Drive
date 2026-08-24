@@ -1,32 +1,53 @@
+"""Publish the robot description and spawn Yolobot in Gazebo."""
+
 import os
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
-from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
-def generate_launch_description():
 
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+def generate_launch_description() -> LaunchDescription:
+    """Create the robot-description publisher and Gazebo spawn launch."""
+    package_share = get_package_share_directory("yolobot_description")
+    default_model = os.path.join(package_share, "robot", "yolobot.urdf.xacro")
+    use_sim_time = LaunchConfiguration("use_sim_time")
+    model = LaunchConfiguration("model")
+    entity_name = LaunchConfiguration("entity_name")
+    robot_description = ParameterValue(
+        Command([FindExecutable(name="xacro"), " ", model]),
+        value_type=str,
+    )
 
-    urdf = os.path.join(get_package_share_directory('yolobot_description'), 'robot/', 'yolobot.urdf')
-    assert os.path.exists(urdf), "The yolobot.urdf doesnt exist in "+str(urdf)
-    
-    with open(urdf, 'r') as infp:
-        robot_desc = infp.read()
-
-    return LaunchDescription([
-        DeclareLaunchArgument(
-            'use_sim_time',
-            default_value='true',
-            description='Use simulation (Gazebo) clock if true'),
-        Node(package='yolobot_description', executable='spawn_yolobot.py', arguments=[urdf], output='screen'),
-   
-        Node(
-            package='robot_state_publisher',
-            executable='robot_state_publisher',
-            name='robot_state_publisher',
-            output='screen',
-            parameters=[{'use_sim_time': use_sim_time, 'robot_description': robot_desc}],
-            arguments=[urdf]),
-    ])
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument("use_sim_time", default_value="true"),
+            DeclareLaunchArgument("model", default_value=default_model),
+            DeclareLaunchArgument("entity_name", default_value="yolobot"),
+            Node(
+                package="robot_state_publisher",
+                executable="robot_state_publisher",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": use_sim_time,
+                        "robot_description": robot_description,
+                    }
+                ],
+            ),
+            Node(
+                package="gazebo_ros",
+                executable="spawn_entity.py",
+                output="screen",
+                arguments=[
+                    "-topic",
+                    "robot_description",
+                    "-entity",
+                    entity_name,
+                ],
+            ),
+        ]
+    )

@@ -2,8 +2,8 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>llm_interfaces</name>
-  <version>0.0.1</version>
-  <description>Interfaces for ROS-LLM package</description>
+  <version>0.1.0</version>
+  <description>Service and message interfaces for Large Model Drive.</description>
   <maintainer email="hermanye233@icloud.com">Herman Ye</maintainer>
   <license>Apache-2.0</license>
 

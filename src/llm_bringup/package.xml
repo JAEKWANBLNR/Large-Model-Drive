@@ -2,12 +2,21 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>llm_bringup</name>
-  <version>0.0.1</version>
-  <description>ROS-LLM bringup Package</description>
+  <version>0.1.0</version>
+  <description>Launch the Large Model Drive simulation and ROS 2 nodes.</description>
   <maintainer email="hermanye233@icloud.com">Herman Ye</maintainer>
   <license>Apache-2.0</license>
   
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>llm_input</exec_depend>
+  <exec_depend>llm_model</exec_depend>
+  <exec_depend>llm_output</exec_depend>
+  <exec_depend>llm_robot</exec_depend>
   <exec_depend>ros2launch</exec_depend>
+  <exec_depend>yolobot_description</exec_depend>
+  <exec_depend>yolobot_gazebo</exec_depend>
+  <exec_depend>yolobot_recognition</exec_depend>
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

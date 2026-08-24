@@ -1,130 +1,96 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# flake8: noqa
-#
-# Copyright 2023 Herman Ye @Auromix
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Description:
-# This file contains the behavior of the robot.
-# It includes a list of functions for the robot to perform,
-# such as publishing a cmd_vel message to control the movement of the robot.
-# To customize the robot's behavior,
-# modify the functions in this file to customize the behavior of your robot
-# and don't forget to modify the corresponding real functions in llm_robot/turtle_robot.py
-#
-# Author: Herman Ye @Auromix
+"""OpenAI function-tool schemas exposed by each robot profile."""
 
-# Example robot functions list for the TurtleSim
-# The user can add, remove, or modify the functions in this list
-robot_functions_list_1 = [
-    {
-        "name": "publish_cmd_vel",
-        "description": "Publish cmd_vel message to control the movement of turtlesim, including rotation and movement,only used for turtlesim,not for robotic arm",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "linear_x": {
-                    "type": "number",
-                    "description": "The linear velocity along the x-axis",
-                },
-                "linear_y": {
-                    "type": "number",
-                    "description": "The linear velocity along the y-axis",
-                },
-                "linear_z": {
-                    "type": "number",
-                    "description": "The linear velocity along the z-axis",
-                },
-                "angular_x": {
-                    "type": "number",
-                    "description": "The angular velocity around the x-axis",
-                },
-                "angular_y": {
-                    "type": "number",
-                    "description": "The angular velocity around the y-axis",
-                },
-                "angular_z": {
-                    "type": "number",
-                    "description": "The angular velocity around the z-axis",
-                },
+from copy import deepcopy
+
+MOBILE_MOTION_TOOL = {
+    "type": "function",
+    "name": "publish_cmd_vel",
+    "description": (
+        "Move the configured mobile robot for a short, bounded duration. "
+        "Use zero for axes that the robot does not support."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "linear_x": {
+                "type": "number",
+                "minimum": -0.5,
+                "maximum": 0.5,
+                "description": "Forward velocity in metres per second.",
             },
-            "required": [
-                "linear_x",
-                "linear_y",
-                "linear_z",
-                "angular_x",
-                "angular_y",
-                "angular_z",
-            ],
-        },
-    },
-  
-
-    {
-        "name": "publish_target_pose",
-        "description": "Publish target pose message to control the movement of arm robot, including x, y, z, roll, pitch, yaw",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "number",
-                    "description": "The x position of the target pose",
-                },
-                "y": {
-                    "type": "number",
-                    "description": "The y position of the target pose",
-                },
-                "z": {
-                    "type": "number",
-                    "description": "The z position of the target pose",
-                },
-                "roll": {
-                    "type": "number",
-                    "description": "The roll of the target pose",
-                },
-                "pitch": {
-                    "type": "number",
-                    "description": "The pitch of the target pose",
-                },
-                "yaw": {
-                    "type": "number",
-                    "description": "The yaw of the target pose",
-                },
+            "linear_y": {
+                "type": "number",
+                "minimum": -0.5,
+                "maximum": 0.5,
+                "description": "Lateral velocity in metres per second.",
             },
-            "required": [
-                "x",
-                "y",
-                "z",
-                "roll",
-                "pitch",
-                "yaw",
-            ],
+            "angular_z": {
+                "type": "number",
+                "minimum": -1.5,
+                "maximum": 1.5,
+                "description": "Yaw rate in radians per second.",
+            },
+            "duration": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 10.0,
+                "description": "Seconds before an automatic stop command.",
+            },
         },
+        "required": ["linear_x", "linear_y", "angular_z", "duration"],
+        "additionalProperties": False,
     },
+    "strict": True,
+}
 
-]
+
+MULTI_ROBOT_MOTION_TOOL = deepcopy(MOBILE_MOTION_TOOL)
+MULTI_ROBOT_MOTION_TOOL["parameters"]["properties"]["robot_name"] = {
+    "type": "string",
+    "description": "ROS namespace of the target robot.",
+}
+MULTI_ROBOT_MOTION_TOOL["parameters"]["required"].append("robot_name")
+
+
+ARM_POSE_TOOL = {
+    "type": "function",
+    "name": "publish_target_pose",
+    "description": "Publish a Cartesian target pose for the configured arm.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            name: {
+                "type": "number",
+                "minimum": -10.0,
+                "maximum": 10.0,
+                "description": f"Target pose {name} component.",
+            }
+            for name in ("x", "y", "z", "roll", "pitch", "yaw")
+        },
+        "required": ["x", "y", "z", "roll", "pitch", "yaw"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+
+PROFILE_TOOLS = {
+    "mobile": [MOBILE_MOTION_TOOL],
+    "multi": [MULTI_ROBOT_MOTION_TOOL],
+    "arm": [ARM_POSE_TOOL],
+}
+
 
 class RobotBehavior:
-    """
-    This class contains the behavior of the robot.
-    It is used in llm_config/user_config.py to customize the behavior of the robot.
-    """
+    """Select the smallest tool surface required by a robot profile."""
 
-    def __init__(self):
-        self.robot_functions_list = robot_functions_list_1
-
-
-if __name__ == "__main__":
-    pass
+    def __init__(self, profile: str = "mobile") -> None:
+        """Initialize the tool list for a named robot profile."""
+        normalized_profile = profile.strip().lower()
+        if normalized_profile not in PROFILE_TOOLS:
+            choices = ", ".join(sorted(PROFILE_TOOLS))
+            raise ValueError(
+                f"Unknown ROBOT_PROFILE '{profile}'. Expected one of: {choices}"
+            )
+        self.profile = normalized_profile
+        self.robot_functions_list = deepcopy(PROFILE_TOOLS[normalized_profile])

@@ -1,40 +1,29 @@
-#!/bin/bash
-#
-# This script configures dependencies for ROS-LLM
-# Version: 1.0
-# Author: Herman Ye @Auromix
-# Date: 2023-06-24
+#!/usr/bin/env bash
+# Install non-ROS runtime dependencies on Ubuntu.
 
-# Exit the script immediately if a command exits with a non-zero status
-# set -x
-set -e
-# Install necessary dependencies for OpenAI
-sudo apt update
-sudo apt upgrade -y
-sudo apt install -y python3
-sudo apt install -y python3-pip
-pip install openai
-sudo apt install gnome-terminal -y
-pip install pysocks
-pip install requests
-sudo apt-get install libcanberra-gtk-module libcanberra-gtk3-module -y
+set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/../.." && pwd)"
 
-# Install AWS boto3
-pip install boto3
-pip install numpy
-pip install sounddevice
-pip install pydub
-pip install scipy
-sudo apt install portaudio19-dev -y
-sudo apt install ffmpeg -y
+sudo apt-get update
+sudo apt-get install -y \
+  ffmpeg \
+  libportaudio2 \
+  mpv \
+  portaudio19-dev \
+  python3-opencv \
+  python3-pip \
+  python3-venv
 
-# Install dependencies for sounddevice/soundfile
-sudo apt install libportaudio2 -y
-sudo apt install alsa-utils -y
-sudo apt install mpv -y
-pip install numpy sounddevice cffi soundfile
+requirements_file="${repository_root}/requirements.txt"
+if [[ "${1:-}" == "--with-whisper" ]]; then
+  requirements_file="${repository_root}/requirements-local-whisper.txt"
+fi
 
-# Check again
-sudo apt update
-sudo apt upgrade -y
+python3 -m pip install --user --upgrade pip
+python3 -m pip install --user -r "${requirements_file}"
+
+echo "Python dependencies installed from ${requirements_file}."
+echo "Install ROS dependencies with:"
+echo "  rosdep install --from-paths src --ignore-src -r -y"

@@ -1,141 +1,136 @@
 #!/usr/bin/env python3
+"""Estimate object distance from organized PointCloud2 samples."""
 
-import rclpy 
-from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2, Image
-from std_msgs.msg import Float32
-import numpy as np
+import math
+import statistics
+
+import rclpy
 import sensor_msgs_py.point_cloud2 as pc2
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import Float32
 
-from cv_bridge import CvBridge
-from yolov8_msgs.msg import Yolov8Inference, InferenceResult
+from yolov8_msgs.msg import Yolov8Inference
+
 
 class DepthExtractor(Node):
-    def __init__(self):
-        super().__init__('depth_extractor')
+    """Publish the median 3D distance for recent target-class detections."""
 
-        #Yolov8 추론 결를 구독하기 위한 구독자 생성 
-        # /Yolov8_inference 토픽에서 Yolov8inference 메시지 구독
-        self.subscription_yolo = self.create_subscription(
-            Yolov8Inference, 
-            '/Yolov8_Inference', 
-            self.callback_yolo, 
-            0)
-        self.get_logger().info('Subscribed to /Yolov8_Inference topic.')
+    def __init__(self) -> None:
+        """Configure synchronized detections and point-cloud sampling."""
+        super().__init__("depth_extractor")
+        self.declare_parameter("inference_topic", "/yolov8/inference")
+        self.declare_parameter("point_cloud_topic", "/camera_sensor/points")
+        self.declare_parameter("distance_topic", "/depth_extractor")
+        self.declare_parameter("target_class", "person")
+        self.declare_parameter("minimum_confidence", 0.25)
+        self.declare_parameter("sample_grid_size", 7)
+        self.declare_parameter("detection_timeout", 1.0)
 
-        #Depth 카메라에서 이미지를 구독하는 구독자 
-        self.subscription_depth = self.create_subscription(
-            PointCloud2, '/camera_sensor/points',
-            self.callback_depth, 
-            0)
-        
-        self.get_logger().info('Subscribed to /camera_sensor/depth/image_raw topic.')
+        self.target_class = str(self.get_parameter("target_class").value)
+        self.minimum_confidence = float(self.get_parameter("minimum_confidence").value)
+        self.sample_grid_size = max(
+            1, int(self.get_parameter("sample_grid_size").value)
+        )
+        self.detection_timeout = float(self.get_parameter("detection_timeout").value)
+        self.detections = []
+        self.last_detection_time = None
 
-        #'/depth_extractor' 토픽에 데이터를 퍼블리시할 퍼블리셔 생성 
-        self.publisher_ = self.create_publisher(Float32, '/depth_extractor', 0)
+        self.inference_subscription = self.create_subscription(
+            Yolov8Inference,
+            self.get_parameter("inference_topic").value,
+            self.inference_callback,
+            10,
+        )
+        self.cloud_subscription = self.create_subscription(
+            PointCloud2,
+            self.get_parameter("point_cloud_topic").value,
+            self.point_cloud_callback,
+            qos_profile_sensor_data,
+        )
+        self.distance_publisher = self.create_publisher(
+            Float32,
+            self.get_parameter("distance_topic").value,
+            10,
+        )
 
-        #인식된 사람의 바운딩 박스 정보를 저장할 리스트 
-        self.bboxes =[]
-
-        #Depth 이미지를 저장할 변수를 초기화 
-        self.point_cloud = None
-        self.timer = self.create_timer(1.0, self.timer_callback)
-        self.latest_avg_distance = None
-        self.last_yolo_timestamp = None
-        self.last_depth_timestep = None
-        
-        self.fx = 554.256  # Focal length in x
-        self.fy = 554.256  # Focal length in y
-        self.cx = 320.0  # Principal point in x
-        self.cy = 240.0  # Principal point in y
-
-    #Yolov8 추론결과 처리 콜백함수 
-    def callback_yolo(self, msg: Yolov8Inference):
-        
-        # self.get_logger().info('Received message on /Yolov8_Inference topic.')
-
-        #추론 결과에서 'person' 클래스를 가진 바운딩 박스를 필터링하여 bboxes리스트에 저장.
-        self.bboxes = [
-            bbox for bbox in msg.yolov8_inference if bbox.class_name == 'person'
+    def inference_callback(self, message: Yolov8Inference) -> None:
+        """Cache the newest target detection for the next point cloud."""
+        self.detections = [
+            detection
+            for detection in message.yolov8_inference
+            if detection.class_name == self.target_class
+            and detection.confidence >= self.minimum_confidence
         ]
-        self.get_logger().info(f'Received {len(self.bboxes)} bounding boxes.')
+        self.last_detection_time = self.get_clock().now()
 
-    def callback_depth(self, msg: PointCloud2):
-        # self.get_logger().info('Received message on /camera/depth/image_raw topic.')
-
-        # Image 메시지 데이터를 numpy배열로 변환하여 self.depth_image 에 저장. 
-        self.point_cloud = msg
-        self.process_depth()
-
-    #바운딩 박스 내의 depth 이미지 처리
-    def process_depth(self):
-        if not self.bboxes:
-            self.get_logger().info('No bounding boxes to process.')
+    def point_cloud_callback(self, cloud: PointCloud2) -> None:
+        """Estimate median Euclidean distance from samples inside the target box."""
+        if not self.detections or self.last_detection_time is None:
             return
-
-        if self.point_cloud is None:
-            self.get_logger().info('No point cloud data to process.')
+        age = (self.get_clock().now() - self.last_detection_time).nanoseconds
+        if age / 1e9 > self.detection_timeout:
+            return
+        if cloud.height <= 1:
+            self.get_logger().warning(
+                "Point cloud is unorganized; pixel-aligned depth is unavailable."
+            )
             return
 
         distances = []
-        points = pc2.read_points(self.point_cloud, field_names=("x","y","z"), skip_nans=True)
-        points_list = list(points)
-        self.get_logger().info(f'Point cloud contains {len(points_list)} points.')
+        for detection in self.detections:
+            uvs = self._sample_pixels(detection, cloud.width, cloud.height)
+            points = pc2.read_points(
+                cloud,
+                field_names=("x", "y", "z"),
+                skip_nans=True,
+                uvs=uvs,
+            )
+            for point in points:
+                x, y, z = (float(point[index]) for index in range(3))
+                if z > 0.0:
+                    distances.append(math.sqrt(x * x + y * y + z * z))
 
-        #각 바운딩 박스에 대해 반복 
-        for bbox in self.bboxes:
-            # 바운딩 박스의 좌상단, 우하단 좌표를 정수형으로 변환
-            x_min, y_min = int(bbox.left), int(bbox.top)
-            x_max, y_max = int(bbox.right), int(bbox.bottom)
-            self.get_logger().info(f'Processing bbox with coordinates: x_min={x_min}, y_min={y_min}, x_max={x_max}, y_max={y_max}')
+        if not distances:
+            return
+        output = Float32()
+        output.data = float(statistics.median(distances))
+        self.distance_publisher.publish(output)
+        self.get_logger().debug(f"Published median distance: {output.data:.3f} m")
 
-            bbox_points = [
-                point for point in points_list
-                if self.is_point_in_bbox(point, x_min, y_min, x_max, y_max)
+    def _sample_pixels(
+        self, detection: object, width: int, height: int
+    ) -> list[tuple[int, int]]:
+        left = min(max(int(detection.left), 0), width - 1)
+        right = min(max(int(detection.right), left), width - 1)
+        top = min(max(int(detection.top), 0), height - 1)
+        bottom = min(max(int(detection.bottom), top), height - 1)
+
+        def samples(start: int, end: int) -> list[int]:
+            if self.sample_grid_size == 1 or start == end:
+                return [(start + end) // 2]
+            step = (end - start) / (self.sample_grid_size - 1)
+            return [
+                int(round(start + index * step))
+                for index in range(self.sample_grid_size)
             ]
-            self.get_logger().info(f'Found {len(bbox_points)} points in the bounding box.')
 
-            for x,y,z in bbox_points:
-                self.get_logger().info(f"Point (x={x}, y={y}. z={z})")
-                if z>0:
-                    distances.append((x**2+y**2+z**2)**5)
-        if distances:
-            self.latest_avg_distance = np.mean(distances)
-            self.get_logger().info(f"Avg distance : {self.latest_avg_distance}")
-        else:
-            self.latest_avg_distance = None
-            self.get_logger().info('No valid depth data within bounding boxes')
+        return [(x, y) for y in samples(top, bottom) for x in samples(left, right)]
 
 
-    def timer_callback(self):
-        self.get_logger().info('Timer callback triggered.')
-
-        if self.latest_avg_distance is not None:
-            distance_msg = Float32()
-            distance_msg.data = self.latest_avg_distance
-            self.publisher_.publish(distance_msg)
-            self.get_logger().info(f"Pub avg distance:{self.latest_avg_distance}")
-        else:
-            self.get_logger().info("No valid depth data to publish")
-    
-    
-    def is_point_in_bbox(self, point, x_min, y_min, x_max, y_max):
-        """point cloud의 좌표가 bbox안에 있는지 확인 """
-        x,y,z = point
-
-        u = int((x * self.fx) / z + self.cx)
-        v = int((y * self.fy) / z + self.cy)
-
-        return x_min <= u <= x_max and y_min <= v <= y_max
-    
-
-def main(args=None):
-        rclpy.init(args=args)
-        depth_extractor = DepthExtractor()
-        rclpy.spin(depth_extractor)
-        depth_extractor.destroy_node()
+def main(args: list[str] | None = None) -> None:
+    """Run the YOLO depth-estimation node."""
+    rclpy.init(args=args)
+    node = DepthExtractor()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

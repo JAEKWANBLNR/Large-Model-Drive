@@ -1,126 +1,130 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# flake8: noqa
-#
-# Copyright 2023 Herman Ye @Auromix
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Description:
-# This example demonstrates simulating function calls for any robot,
-# such as controlling velocity and other service commands.
-# By modifying the content of this file,
-# A calling interface can be created for the function calls of any robot.
-# The Python script creates a ROS 2 Node
-# that controls the movement of the TurtleSim
-# by creating a publisher for cmd_vel messages and a client for the reset service.
-# It also includes a ChatGPT function call server
-# that can call various functions to control the TurtleSim
-# and return the result of the function call as a string.
-#
-# Author: Herman Ye @Auromix
+"""Bounded mobile-base tool server for model-issued motion commands."""
 
-# ROS related
-import rclpy
-import rclpy.duration
-from rclpy.node import Node
-from llm_interfaces.srv import ChatGPT
-from geometry_msgs.msg import Twist, PoseStamped
-from geometry_msgs.msg import Pose
-from std_srvs.srv import Empty
-from geometry_msgs.msg import Quaternion
-import tf2_ros
-
-from nav_msgs.msg import Odometry
-from rclpy.action import ActionClient
-import math
-from nav2_msgs.action import NavigateToPose
-
-# LLM related
 import json
-import time
+from typing import Any
 
-from llm_config.user_config import UserConfig
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
 
-# Global Initialization
-config = UserConfig()
+from llm_interfaces.srv import ChatGPT
 
 
-class YolobotContoller(Node):
-    def __init__(self):
+def _arguments_from_request(request_text: str) -> tuple[str, dict[str, Any]]:
+    request = json.loads(request_text)
+    name = request["name"]
+    arguments = request.get("arguments", {})
+    if isinstance(arguments, str):
+        arguments = json.loads(arguments)
+    if not isinstance(arguments, dict):
+        raise ValueError("Tool arguments must be a JSON object.")
+    return name, arguments
+
+
+class YolobotController(Node):
+    """Expose only the mobile-base velocity tool over a ROS 2 service."""
+
+    def __init__(self) -> None:
+        """Configure motion bounds, publisher, and tool service."""
         super().__init__("yolobot_controller")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("function_service", "/llm/function_call")
+        self.declare_parameter("max_linear_speed", 0.5)
+        self.declare_parameter("max_angular_speed", 1.5)
+        self.declare_parameter("max_command_duration", 10.0)
 
-        # Publisher for cmd_vel
-        self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
-
-        # Pose Publisher
-        self.pose_publisher_ = self.create_publisher(Pose, '/Pose', 10)
-
-        self.function_call_server = self.create_service(
-            ChatGPT, "/ChatGPT_function_call_service", self.function_call_callback
+        self.max_linear_speed = float(self.get_parameter("max_linear_speed").value)
+        self.max_angular_speed = float(self.get_parameter("max_angular_speed").value)
+        self.max_command_duration = float(
+            self.get_parameter("max_command_duration").value
         )
-        # Node initialization log
-        self.get_logger().info("YolobotController node has been initialized")
 
-    def function_call_callback(self, request, response):
-        req = json.loads(request.request_text)
-        function_name = req["name"]
-        function_args = json.loads(req["arguments"])
-        func_obj = getattr(self, function_name)
+        self.cmd_vel_publisher = self.create_publisher(
+            Twist, self.get_parameter("cmd_vel_topic").value, 10
+        )
+        self.function_call_server = self.create_service(
+            ChatGPT,
+            self.get_parameter("function_service").value,
+            self.function_call_callback,
+        )
+        self.stop_timer = None
+        self.allowed_functions = {"publish_cmd_vel": self.publish_cmd_vel}
+        self.get_logger().info("Bounded mobile robot tool server is ready.")
+
+    def function_call_callback(
+        self, request: ChatGPT.Request, response: ChatGPT.Response
+    ) -> ChatGPT.Response:
+        """Validate and execute one allow-listed tool call."""
         try:
-            function_execution_result = func_obj(**function_args)
-        except Exception as error:
-            self.get_logger().info(f"Failed to call function: {error}")
-            response.response_text = str(error)
-        else:
-            response.response_text = str(function_execution_result)
+            name, arguments = _arguments_from_request(request.request_text)
+            function = self.allowed_functions.get(name)
+            if function is None:
+                raise ValueError(f"Unsupported robot function: {name}")
+            result = function(**arguments)
+            response.response_text = json.dumps({"ok": True, **result})
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self.get_logger().error(f"Rejected robot function call: {error}")
+            response.response_text = json.dumps({"ok": False, "error": str(error)})
         return response
 
-    def publish_cmd_vel(self, **kwargs):
-        """
-        Publishes cmd_vel message to control the movement of turtlesim
-        """
-        linear_x = kwargs.get("linear_x", 0.0)
-        linear_y = kwargs.get("linear_y", 0.0)
-        linear_z = kwargs.get("linear_z", 0.0)
-        angular_x = kwargs.get("angular_x", 0.0)
-        angular_y = kwargs.get("angular_y", 0.0)
-        angular_z = kwargs.get("angular_z", 0.0)
+    def publish_cmd_vel(
+        self,
+        linear_x: float,
+        linear_y: float,
+        angular_z: float,
+        duration: float,
+    ) -> dict[str, Any]:
+        """Publish a clamped velocity and schedule a guaranteed stop."""
+        duration = min(max(float(duration), 0.1), self.max_command_duration)
+        command = Twist()
+        command.linear.x = self._clamp(linear_x, self.max_linear_speed)
+        command.linear.y = self._clamp(linear_y, self.max_linear_speed)
+        command.angular.z = self._clamp(angular_z, self.max_angular_speed)
+        self.cmd_vel_publisher.publish(command)
+        self._schedule_stop(duration)
+        result = {
+            "linear_x": command.linear.x,
+            "linear_y": command.linear.y,
+            "angular_z": command.angular.z,
+            "duration": duration,
+        }
+        self.get_logger().info(f"Published bounded velocity command: {result}")
+        return result
 
-        twist_msg = Twist()
-        twist_msg.linear.x = float(linear_x)
-        twist_msg.linear.y = float(linear_y)
-        twist_msg.linear.z = float(linear_z)
-        twist_msg.angular.x = float(angular_x)
-        twist_msg.angular.y = float(angular_y)
-        twist_msg.angular.z = float(angular_z)
+    @staticmethod
+    def _clamp(value: float, limit: float) -> float:
+        numeric_value = float(value)
+        return min(max(numeric_value, -abs(limit)), abs(limit))
 
-        self.publisher_.publish(twist_msg)
-        self.get_logger().info(f"Publishing cmd_vel message successfully: {twist_msg}")
-        return twist_msg
-    
-    def rotate_angle(self,**kwargs):
+    def _schedule_stop(self, duration: float) -> None:
+        if self.stop_timer is not None:
+            self.stop_timer.cancel()
+        self.stop_timer = self.create_timer(duration, self._publish_stop)
+
+    def _publish_stop(self) -> None:
+        self.cmd_vel_publisher.publish(Twist())
+        if self.stop_timer is not None:
+            self.stop_timer.cancel()
+            self.stop_timer = None
+        self.get_logger().info("Published automatic stop command.")
+
+    def destroy_node(self) -> bool:
+        """Publish a final stop command before node destruction."""
+        self.cmd_vel_publisher.publish(Twist())
+        return super().destroy_node()
+
+
+def main(args: list[str] | None = None) -> None:
+    """Run the mobile-base tool-server ROS node."""
+    rclpy.init(args=args)
+    node = YolobotController()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
         pass
-
-
-    def move_distance(self, **kwargs):
-        pass    
- 
-def main():
-    rclpy.init()
-    yolobot_controller = YolobotContoller()
-    rclpy.spin(yolobot_controller)
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

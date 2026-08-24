@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.8)
 project(yolobot_description)
 
 # Default to C99
@@ -36,15 +36,10 @@ endif()
 install(
   DIRECTORY
     launch
+    maps
     robot
   DESTINATION
     share/${PROJECT_NAME}/
-)
-
-install(
-  PROGRAMS
-  launch/spawn_yolobot.py
-  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()

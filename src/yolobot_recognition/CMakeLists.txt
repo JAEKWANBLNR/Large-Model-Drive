@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.8)
 project(yolobot_recognition)
 
 # Default to C99
@@ -36,20 +36,13 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-install(
-  DIRECTORY
-    scripts
-    launch
-  DESTINATION
-    share/${PROJECT_NAME}/
-)
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 install(
   PROGRAMS
   scripts/yolov8_ros2_pt.py
   scripts/yolov8_ros2_subscriber.py
   scripts/yolov8_depth.py
-  launch/launch_yolov8.launch.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

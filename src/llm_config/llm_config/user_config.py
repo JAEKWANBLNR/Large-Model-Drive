@@ -1,128 +1,118 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# flake8: noqa
-#
-# Copyright 2023 Herman Ye @Auromix
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Description:
-# This is a configuration file for a conversational AI assistant
-# that uses the OpenAI API for generating responses.
-#
-# The user can specify the OpenAI language model to be used, the organization
-# under which their API key is registered (if applicable), and several parameters
-# that affect the creativity and coherence of the AI's responses, such as the
-# temperature, top probability cutoff, and frequency and presence penalties.
-#
-# The user can also specify the prompt given to the AI, the prefix for the AI's response,
-# and the maximum number of tokens and length allowed in the response.
-#
-# The chat history can be stored in a JSON file, with a maximum length limit.
-#
-# The assistant's behavior can be customized using a RobotBehavior object
-# and a list of robot functions.
-#
-# The API credentials for Amazon AWS are provided, along with parameters
-# for AWS S3, Transcribe, and Polly services, and parameters for audio recording.
-#
-# Author: Herman Ye @Auromix
+"""Environment-backed configuration for the Large Model Drive nodes."""
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from .robot_behavior import RobotBehavior
-import os
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a floating-point environment variable with a safe default."""
+    value = os.getenv(name)
+    return default if value is None else float(value)
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer environment variable with a safe default."""
+    value = os.getenv(name)
+    return default if value is None else int(value)
+
+
+def _history_directory() -> Path:
+    configured = os.getenv("LLM_CHAT_HISTORY_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".ros" / "large_model_drive"
+
+
+@dataclass
 class UserConfig:
-    def __init__(self):
-        # OpenAI API related
-        # [required]: OpenAI API key
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        # [required]: Name of the OpenAI language model to be used
-        self.openai_model = "gpt-3.5-turbo"
-        # self.openai_model="gpt-4-0613"
-        # [optional]: Name of the organization under which the OpenAI API key is registered
-        self.openai_organization = "Auromix"
-        # [optional]: Controls the creativity of the AI’s responses. Higher values lead to more creative, but less coherent, responses
-        self.openai_temperature = 1
-        # [optional]: Probability distribution cutoff for generating responses
-        self.openai_top_p = 1
-        # [optional]: Number of responses to generate in batch
-        self.openai_n = 1
-        # [optional]: Whether to stream response results or not
-        self.openai_stream = False
-        # [optional]: String that if present in the AI's response, marks the end of the response
-        self.openai_stop = "NULL"
-        # [optional]: Maximum number of tokens allowed in the AI's respons
-        self.openai_max_tokens = 4000
-        # self.openai_max_tokens= 16000
-        # [optional]: Value that promotes the AI to generates responses with higher diversity
-        self.openai_frequency_penalty = 0
-        # [optional]: Value that promotes the AI to generates responses with more information at the text prompt
-        self.openai_presence_penalty = 0
+    """Runtime settings shared by the ROS 2 packages.
 
-        # IO related
-        # [optional]: The prompt given to the AI, provided by the user
-        self.user_prompt = ""
-        # [optional]: The generated prompt by the administrator, used as a prefix for the AI's response
-        self.system_prompt = ""
-        # TODO: System prompt only works for the first message,so it will be forgotten soon after the first message
-        # modify the llm_model/chatgpt.py, add system_prompt to every prompt to solve this problem @Herman Ye
-        # [optional]: The generated response provided by the AI
-        self.assistant_response = ""
+    Secrets are read from the standard environment or provider credential chain.
+    Nothing in this class writes credentials to disk.
+    """
 
-        # Chat history related
-        # [optional]: The chat history, including the user prompt, system prompt, and assistant response
-        self.chat_history = [{"role": "system", "content": self.system_prompt}]
-        # [optional]: The path to the chat history JSON file
-        self.chat_history_path = os.path.expanduser("~")
-        # self.chat_history_path = os.path.dirname(os.path.abspath(__file__))
-        # [optional]: The limit of the chat history length
-        self.chat_history_max_length = 4000
-        # self.chat_history_max_length=16000
+    openai_api_key: str | None = field(
+        default_factory=lambda: os.getenv("OPENAI_API_KEY")
+    )
+    openai_model: str = field(
+        default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+    )
+    openai_reasoning_effort: str = field(
+        default_factory=lambda: os.getenv("OPENAI_REASONING_EFFORT", "none")
+    )
+    openai_max_output_tokens: int = field(
+        default_factory=lambda: _env_int("OPENAI_MAX_OUTPUT_TOKENS", 512)
+    )
+    openai_request_timeout: float = field(
+        default_factory=lambda: _env_float("OPENAI_REQUEST_TIMEOUT", 30.0)
+    )
+    system_prompt: str = field(
+        default_factory=lambda: os.getenv(
+            "LLM_SYSTEM_PROMPT",
+            (
+                "Control only the configured robot. Use a tool for physical "
+                "actions, and never claim an action succeeded until its tool "
+                "result confirms success. Keep motion within the tool limits "
+                "and ask for clarification when a command is ambiguous."
+            ),
+        )
+    )
+    chat_history_path: Path = field(default_factory=_history_directory)
+    chat_history_max_items: int = field(
+        default_factory=lambda: _env_int("LLM_CHAT_HISTORY_MAX_ITEMS", 100)
+    )
+    max_tool_iterations: int = field(
+        default_factory=lambda: _env_int("LLM_MAX_TOOL_ITERATIONS", 3)
+    )
 
-        # Robot behavior related
-        # [optional]: The robot behavior object
-        self.robot_behavior = RobotBehavior()
-        # [optional]: The robot functions list
+    robot_profile: str = field(
+        default_factory=lambda: os.getenv("ROBOT_PROFILE", "mobile")
+    )
+    multi_robots_name: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            name.strip()
+            for name in os.getenv("ROBOT_NAMES", "yolobot,turtle2,minipupper").split(
+                ","
+            )
+            if name.strip()
+        )
+    )
+
+    aws_region_name: str = field(
+        default_factory=lambda: os.getenv("AWS_REGION", "ap-southeast-1")
+    )
+    bucket_name: str | None = field(default_factory=lambda: os.getenv("AWS_S3_BUCKET"))
+    aws_transcription_language: str = field(
+        default_factory=lambda: os.getenv("AWS_TRANSCRIBE_LANGUAGE", "en-US")
+    )
+    aws_voice_id: str = field(
+        default_factory=lambda: os.getenv("AWS_POLLY_VOICE_ID", "Ivy")
+    )
+
+    whisper_model_size: str = field(
+        default_factory=lambda: os.getenv("WHISPER_MODEL_SIZE", "base")
+    )
+    whisper_language: str = field(
+        default_factory=lambda: os.getenv("WHISPER_LANGUAGE", "en")
+    )
+    duration: float = field(
+        default_factory=lambda: _env_float("AUDIO_RECORD_SECONDS", 5.0)
+    )
+    sample_rate: int = field(
+        default_factory=lambda: _env_int("AUDIO_SAMPLE_RATE", 16000)
+    )
+    volume_gain_multiplier: float = field(
+        default_factory=lambda: _env_float("AUDIO_GAIN", 1.0)
+    )
+    audio_player: str = field(default_factory=lambda: os.getenv("AUDIO_PLAYER", "mpv"))
+
+    robot_behavior: RobotBehavior = field(init=False)
+    robot_functions_list: list[dict] = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Resolve the profile-specific robot tool schema."""
+        self.robot_behavior = RobotBehavior(self.robot_profile)
         self.robot_functions_list = self.robot_behavior.robot_functions_list
-        # [optional]: Multi-robot list
-        # "" is for robot without name
-        self.multi_robots_name=["yolobot","turtle2","minipupper",""]
-        
-        # AWS related
-        # [required]: AWS IAM access key id
-        self.aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
-        # [required]: AWS IAM secret access key
-        self.aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        # [required]: AWS IAM region name
-        self.aws_region_name = 'ap-southeast-1'
-        # [required]: AWS S3 bucket name
-        self.bucket_name = 'auromixbucket'
-        # [optional]: AWS transcription language, change this to 'zh-CN' for Chinese
-        self.aws_transcription_language = "en-US"
-        # [optional]: AWS polly voice id, change this to 'Zhiyu' for Chinese
-        self.aws_voice_id = "Ivy"
-
-        # OpenAI Whisper Model size related
-        # [optional]: OpenAI Whisper Model size: tiny base small medium large
-        self.whisper_model_size = "medium"
-        # [optional]: OpenAI Whisper Model language: en
-        self.whisper_language="en"
-        # Audio recording related
-        # [optional]: Audio recording duration, in seconds
-        self.duration = 5
-        # [optional]: Audio recording sample rate, in Hz
-        self.sample_rate = 16000
-        # [optional]: Audio recording gain multiplier
-        # Change this to increase or decrease the volume
-        self.volume_gain_multiplier = 1

@@ -1,75 +1,104 @@
 #!/usr/bin/env python3
+"""Run Ultralytics YOLO inference on a ROS image stream."""
 
-from ultralytics import YOLO
+from pathlib import Path
+
 import rclpy
+from cv_bridge import CvBridge
 from rclpy.node import Node
-from sensor_msgs.msg import Image #ROS2의 표준 이미지 메시지 타입 
-from cv_bridge import CvBridge #ROS2 이미지 메시지와 OpenCV 이미지간의 변환을 도움 
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+from ultralytics import YOLO
 
-from yolov8_msgs.msg import InferenceResult #메시지 타입 임포트 
-from yolov8_msgs.msg import Yolov8Inference
+from yolov8_msgs.msg import InferenceResult, Yolov8Inference
 
-bridge = CvBridge() # bridge 인스턴스 생성, ROS이미지를 OpenCV이미지로 변환 
 
-class Yolo_camera_subscriber(Node):
+class YoloCameraSubscriber(Node):
+    """Publish typed detections and an annotated image for each camera frame."""
 
-    def __init__(self):
-        super().__init__('yolo_camera_subscriber') #노드 이름 'camera_subscriber' 
+    def __init__(self) -> None:
+        """Load the configured detector and initialize ROS interfaces."""
+        super().__init__("yolov8_detector")
+        self.declare_parameter("model_path", "yolov8n.pt")
+        self.declare_parameter("image_topic", "/camera_sensor/image_raw")
+        self.declare_parameter("inference_topic", "/yolov8/inference")
+        self.declare_parameter("annotated_topic", "/yolov8/annotated_image")
+        self.declare_parameter("confidence", 0.25)
+        self.declare_parameter("device", "")
 
-        #yolov8 모델 불러오기 
-        self.model = YOLO('~/yolobot/src/yolobot_recognition/scripts/yolov8n.pt')
+        model_path = str(Path(self.get_parameter("model_path").value).expanduser())
+        self.confidence = float(self.get_parameter("confidence").value)
+        self.device = str(self.get_parameter("device").value).strip() or None
+        self.bridge = CvBridge()
+        self.model = YOLO(model_path)
 
-        #Yolov8Inference 메시지 객체 초기화, 추론 결과 담음 
-        self.yolov8_inference = Yolov8Inference()
-        
-        # 'Image' 타입의 메시지를 camera_sensor/image_raw topic에서 구독. 
-        self.subscription = self.create_subscription(
+        self.image_subscription = self.create_subscription(
             Image,
-            'camera_sensor/image_raw',
+            self.get_parameter("image_topic").value,
             self.camera_callback,
-            10)
-        self.subscription 
-        # /Yolo8_Inference 토픽에 메시지 pub 
-        self.yolov8_pub = self.create_publisher(Yolov8Inference, "/Yolov8_Inference", 1)
+            qos_profile_sensor_data,
+        )
+        self.inference_publisher = self.create_publisher(
+            Yolov8Inference,
+            self.get_parameter("inference_topic").value,
+            10,
+        )
+        self.annotated_publisher = self.create_publisher(
+            Image,
+            self.get_parameter("annotated_topic").value,
+            10,
+        )
+        self.get_logger().info(f"Loaded YOLO model: {model_path}")
 
-        self.img_pub = self.create_publisher(Image, "/inference_result", 1)
+    def camera_callback(self, message: Image) -> None:
+        """Run inference on one camera frame and publish structured results."""
+        try:
+            image = self.bridge.imgmsg_to_cv2(message, "bgr8")
+            results = self.model.predict(
+                source=image,
+                conf=self.confidence,
+                device=self.device,
+                verbose=False,
+            )
+            inference_message = Yolov8Inference()
+            inference_message.header = message.header
 
-    def camera_callback(self, data): # data: /camera_sensor/image_raw 토픽에서 수신된 ROS 이미지 
-        #  ROS image 메시지를 openCV 형식으로 전환, BGR 8비트 형식 
-        img = bridge.imgmsg_to_cv2(data, "bgr8")
+            for result in results:
+                for box in result.boxes:
+                    x_min, y_min, x_max, y_max = box.xyxy[0].cpu().tolist()
+                    detection = InferenceResult()
+                    class_index = int(box.cls[0].item())
+                    detection.class_name = str(self.model.names[class_index])
+                    detection.confidence = float(box.conf[0].item())
+                    detection.left = int(round(x_min))
+                    detection.top = int(round(y_min))
+                    detection.right = int(round(x_max))
+                    detection.bottom = int(round(y_max))
+                    inference_message.yolov8_inference.append(detection)
 
-        # Load된 YOLOv8 모델에 변환된 image를 집어 넣고, result 객체에 할당. 
-        results = self.model(img)
+            annotated_image = results[0].plot()
+            annotated_message = self.bridge.cv2_to_imgmsg(
+                annotated_image, encoding="bgr8"
+            )
+            annotated_message.header = message.header
+            self.annotated_publisher.publish(annotated_message)
+            self.inference_publisher.publish(inference_message)
+        except Exception as error:
+            self.get_logger().error(f"YOLO inference failed: {error}")
 
-        # 메시지의 header에 담을 내용 
-        self.yolov8_inference.header.frame_id = "inference" #메시지 헤더의 frame_id를 'inference' 로 설정 
-        self.yolov8_inference.header.stamp = yolo_camera_subscriber.get_clock().now().to_msg() #현재시간을 메시지 헤더의 타임스탬프로 설정 
 
-        for r in results: #모델 추론 결과를 반복 
-            boxes = r.boxes #각 결과에서 검출된 bbox 를 추출 
-            for box in boxes:
-                self.inference_result = InferenceResult() #InferenceResult 메시지 초기화, 객체생성 
-                b = box.xyxy[0].to('cpu').detach().numpy().copy()  # get box coordinates in (top, left, bottom, right) format
-                c = box.cls #검출된 객체의 클래스 index를 추출 
-                self.inference_result.class_name = self.model.names[int(c)]
-                self.inference_result.top = int(b[0])
-                self.inference_result.left = int(b[1])
-                self.inference_result.bottom = int(b[2])
-                self.inference_result.right = int(b[3])
-                self.yolov8_inference.yolov8_inference.append(self.inference_result) #inference result 객체를 Yolov8Inferecne 메시지의 두번째 열,yolov8_inference 배열에 추가 
+def main(args: list[str] | None = None) -> None:
+    """Run the YOLO inference node."""
+    rclpy.init(args=args)
+    node = YoloCameraSubscriber()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
-            #camera_subscriber.get_logger().info(f"{self.yolov8_inference}")
 
-        # 이미지 주석 및 결과 publish 
-        annotated_frame = results[0].plot() # 첫번째 결과 이미지에 주석을 추가 (plot()은 bbox와 라벨을 그리는 역할을 함)
-        img_msg = bridge.cv2_to_imgmsg(annotated_frame) #주석이 추가된 이미지를 ros이미지 메시지로 변환 
-
-        self.img_pub.publish(img_msg) #/Infrence_Result 토픽에 ros이미지 메시지를 퍼블리시 
-        self.yolov8_pub.publish(self.yolov8_inference) #메시지를 /Yolov8_inferecne 토픽에 pub 
-        self.yolov8_inference.yolov8_inference.clear() # yolov8Inference 메시지 객체의 리스트를 초기화 
-
-if __name__ == '__main__':
-    rclpy.init(args=None)
-    yolo_camera_subscriber = Yolo_camera_subscriber()
-    rclpy.spin(yolo_camera_subscriber)
-    rclpy.shutdown()
+if __name__ == "__main__":
+    main()

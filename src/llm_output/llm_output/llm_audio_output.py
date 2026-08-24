@@ -1,122 +1,101 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# flake8: noqa
-#
-# Copyright 2023 Herman Ye @Auromix
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Description:
-#
-# Node test Method:
-# ros2 run llm_output llm_audio_output
-# ros2 topic pub /llm_feedback_to_user std_msgs/msg/String "data: 'Hello, welcome to ROS-LLM'" -1
-#
-# Author: Herman Ye @Auromix
+"""Synthesize LLM feedback with Amazon Polly and play it locally."""
 
-# Other libraries
-import datetime
-import json
-import requests
-import time
+import subprocess
+import tempfile
+import threading
+import uuid
+from pathlib import Path
 
-# AWS ASR related
 import boto3
-import os
-
-# Audio recording related
-import sounddevice as sd
-from scipy.io.wavfile import write
-
-# ROS related
 import rclpy
+from llm_config.user_config import UserConfig
 from rclpy.node import Node
 from std_msgs.msg import String
 
-# Global Initialization
-from llm_config.user_config import UserConfig
-
-config = UserConfig()
-
 
 class AudioOutput(Node):
-    def __init__(self):
-        super().__init__("audio_output")
+    """Play queued feedback while keeping the ROS callback responsive."""
 
-        # Initialization publisher
+    def __init__(self) -> None:
+        """Configure Polly access and ROS feedback interfaces."""
+        super().__init__("llm_audio_output")
+        self.config = UserConfig()
+        self.declare_parameter("feedback_topic", "/llm/feedback")
+        self.aws_session = boto3.Session(region_name=self.config.aws_region_name)
+        self.state_publisher = self.create_publisher(String, "/llm/state", 10)
         self.initialization_publisher = self.create_publisher(
-            String, "/llm_initialization_state", 0
+            String, "/llm/initialization_state", 10
         )
-
-        # LLM state publisher
-        self.llm_state_publisher = self.create_publisher(String, "/llm_state", 0)
-
-        # Feedback for user listener
-        self.feed_back_for_user_subscriber = self.create_subscription(
-            String, "/llm_feedback_to_user", self.feedback_for_user_callback, 10
+        self.feedback_subscriber = self.create_subscription(
+            String,
+            self.get_parameter("feedback_topic").value,
+            self.feedback_for_user_callback,
+            10,
         )
+        self.busy = False
+        self._publish_string("llm_audio_output", self.initialization_publisher)
 
-        # AWS parameters
-        self.aws_access_key_id = config.aws_access_key_id
-        self.aws_secret_access_key = config.aws_secret_access_key
-        self.aws_region_name = config.aws_region_name
-        self.aws_session = boto3.Session(
-            aws_access_key_id=self.aws_access_key_id,
-            aws_secret_access_key=self.aws_secret_access_key,
-            region_name=self.aws_region_name,
+    def feedback_for_user_callback(self, message: String) -> None:
+        """Start speech synthesis for one non-empty feedback message."""
+        text = message.data.strip()
+        if not text:
+            return
+        if self.busy:
+            self.get_logger().warning("Audio output is busy; feedback was skipped.")
+            return
+        self.busy = True
+        threading.Thread(
+            target=self._synthesize_and_play,
+            args=(text,),
+            name="aws-audio-output",
+            daemon=True,
+        ).start()
+
+    def _synthesize_and_play(self, text: str) -> None:
+        output_path = Path(tempfile.gettempdir()) / (
+            f"llm_speech_{uuid.uuid4().hex}.mp3"
         )
-        # Initialization ready
-        self.publish_string("output ready", self.initialization_publisher)
+        try:
+            polly = self.aws_session.client("polly")
+            response = polly.synthesize_speech(
+                Text=text,
+                OutputFormat="mp3",
+                VoiceId=self.config.aws_voice_id,
+            )
+            output_path.write_bytes(response["AudioStream"].read())
+            subprocess.run(
+                [self.config.audio_player, "--no-video", str(output_path)],
+                check=True,
+                timeout=120,
+            )
+        except Exception as error:
+            self.get_logger().error(f"Audio output failed: {error}")
+        finally:
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.busy = False
+            self._publish_string("listening", self.state_publisher)
 
-    def feedback_for_user_callback(self, msg):
-        self.get_logger().info("Received text: '%s'" % msg.data)
-
-        # Call AWS Polly service to synthesize speech
-        polly_client = self.aws_session.client("polly")
-        self.get_logger().info("Polly client successfully initialized.")
-        response = polly_client.synthesize_speech(
-            Text=msg.data, OutputFormat="mp3", VoiceId=config.aws_voice_id
-        )
-
-        # Save the audio output to a file
-        output_file_path = "/tmp/speech_output.mp3"
-        with open(output_file_path, "wb") as file:
-            file.write(response["AudioStream"].read())
-        # Play the audio output
-        os.system("mpv" + " " + output_file_path)
-        self.get_logger().info("Finished Polly playing.")
-        self.publish_string("feedback finished", self.llm_state_publisher)
-        self.publish_string("listening", self.llm_state_publisher)
-
-    def publish_string(self, string_to_send, publisher_to_use):
-        msg = String()
-        msg.data = string_to_send
-
-        publisher_to_use.publish(msg)
-        self.get_logger().info(
-            f"Topic: {publisher_to_use.topic_name}\nMessage published: {msg.data}"
-        )
+    @staticmethod
+    def _publish_string(text: str, publisher: object) -> None:
+        message = String()
+        message.data = text
+        publisher.publish(message)
 
 
-def main(args=None):
+def main(args: list[str] | None = None) -> None:
+    """Run the AWS Polly audio-output ROS node."""
     rclpy.init(args=args)
-
-    audio_output = AudioOutput()
-
-    rclpy.spin(audio_output)
-
-    audio_output.destroy_node()
-    rclpy.shutdown()
+    node = AudioOutput()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
